@@ -52,7 +52,8 @@ import org.ietf.jgss.Oid;
 public class ThriftHttpServlet extends TServlet {
   private static final long serialVersionUID = 1L;
   public static final Log LOG = LogFactory.getLog(ThriftHttpServlet.class.getName());
-  private transient final UserGroupInformation realUser;
+  private transient final UserGroupInformation serviceUGI;
+  private transient final UserGroupInformation httpUGI;
   private transient final Configuration conf;
   private final boolean securityEnabled;
   private final boolean doAsEnabled;
@@ -65,10 +66,11 @@ public class ThriftHttpServlet extends TServlet {
   public static final String NEGOTIATE = "Negotiate";
 
   public ThriftHttpServlet(TProcessor processor, TProtocolFactory protocolFactory,
-      UserGroupInformation realUser, Configuration conf, ThriftServerRunner.HBaseHandler
-      hbaseHandler, boolean securityEnabled, boolean doAsEnabled) {
+      UserGroupInformation serviceUGI, UserGroupInformation httpUGI, Configuration conf,
+      ThriftServerRunner.HBaseHandler hbaseHandler, boolean securityEnabled, boolean doAsEnabled) {
     super(processor, protocolFactory);
-    this.realUser = realUser;
+    this.serviceUGI = serviceUGI;
+    this.httpUGI = httpUGI;
     this.conf = conf;
     this.hbaseHandler = hbaseHandler;
     this.securityEnabled = securityEnabled;
@@ -98,7 +100,7 @@ public class ThriftHttpServlet extends TServlet {
     }
     String doAsUserFromQuery = request.getHeader("doAs");
     if(effectiveUser == null) {
-      effectiveUser = realUser.getShortUserName();
+      effectiveUser = serviceUGI.getShortUserName();
     }
     if (doAsUserFromQuery != null) {
       if (!doAsEnabled) {
@@ -112,7 +114,7 @@ public class ThriftHttpServlet extends TServlet {
           remoteUser);
       // validate the proxy user authorization
       try {
-        ProxyUsers.authorize(ugi, request.getRemoteAddr(), conf);
+        ProxyUsers.authorize(ugi, request.getRemoteAddr());
       } catch (AuthorizationException e) {
         throw new ServletException(e.getMessage());
       }
@@ -129,17 +131,31 @@ public class ThriftHttpServlet extends TServlet {
    */
   private String doKerberosAuth(HttpServletRequest request)
       throws HttpAuthenticationException {
-    HttpKerberosServerAction action = new HttpKerberosServerAction(request, realUser);
+    // Try authenticating with the HTTP/_HOST principal
+    HttpKerberosServerAction action;
+    String principal;
+    if (httpUGI != null) {
+      try {
+        action = new HttpKerberosServerAction(request, httpUGI);
+        principal = httpUGI.doAs(action);
+        outToken = action.outToken;
+        return principal;
+      } catch (Exception e) {
+        LOG.info("Failed to authenticate with HTTP/_HOST kerberos principal, " +
+            "trying with hbase/_HOST kerberos principal");
+      }
+    }
+    // Now try with hbase/_HOST principal
     try {
-      String principal = realUser.doAs(action);
+      action = new HttpKerberosServerAction(request, serviceUGI);
+      principal = serviceUGI.doAs(action);
       outToken = action.outToken;
       return principal;
     } catch (Exception e) {
-      LOG.error("Failed to perform authentication");
+      LOG.error("Failed to authenticate with hbase/_HOST kerberos principal");
       throw new HttpAuthenticationException(e);
     }
   }
-
 
   private static class HttpKerberosServerAction implements PrivilegedExceptionAction<String> {
     HttpServletRequest request;

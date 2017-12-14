@@ -143,13 +143,13 @@ public class ThriftServerRunner implements Runnable {
 
   private static final Log LOG = LogFactory.getLog(ThriftServerRunner.class);
 
-  static final String SERVER_TYPE_CONF_KEY =
-      "hbase.regionserver.thrift.server.type";
+  static final String SERVER_TYPE_CONF_KEY = "hbase.regionserver.thrift.server.type";
 
   static final String BIND_CONF_KEY = "hbase.regionserver.thrift.ipaddress";
   static final String COMPACT_CONF_KEY = "hbase.regionserver.thrift.compact";
   static final String FRAMED_CONF_KEY = "hbase.regionserver.thrift.framed";
-  static final String MAX_FRAME_SIZE_CONF_KEY = "hbase.regionserver.thrift.framed.max_frame_size_in_mb";
+  static final String MAX_FRAME_SIZE_CONF_KEY =
+      "hbase.regionserver.thrift.framed.max_frame_size_in_mb";
   static final String PORT_CONF_KEY = "hbase.regionserver.thrift.port";
   static final String COALESCE_INC_KEY = "hbase.regionserver.thrift.coalesceIncrement";
   static final String USE_HTTP_CONF_KEY = "hbase.regionserver.thrift.http";
@@ -161,6 +161,14 @@ public class ThriftServerRunner implements Runnable {
   static final String THRIFT_SSL_KEYSTORE_PASSWORD = "hbase.thrift.ssl.keystore.password";
   static final String THRIFT_SSL_KEYSTORE_KEYPASSWORD = "hbase.thrift.ssl.keystore.keypassword";
 
+  static final String THRIFT_SUPPORT_PROXYUSER = "hbase.thrift.support.proxyuser";
+
+  static final String THRIFT_DNS_INTERFACE = "hbase.thrift.dns.interface";
+  static final String THRIFT_DNS_NAMESERVER = "hbase.thrift.dns.nameserver";
+  static final String THRIFT_KEYTAB_FILE = "hbase.thrift.keytab.file";
+  static final String THRIFT_KERBEROS_PRINCIPAL = "hbase.thrift.kerberos.principal";
+  static final String THRIFT_SPNEGO_KEYTAB_FILE = "hbase.thrift.spnego.keytab.file";
+  static final String THRIFT_SPNEGO_PRINCIPAL = "hbase.thrift.spnego.principal";
 
   /**
    * Thrift quality of protection configuration key. Valid values can be:
@@ -176,7 +184,7 @@ public class ThriftServerRunner implements Runnable {
   private static final String DEFAULT_BIND_ADDR = "0.0.0.0";
   public static final int DEFAULT_LISTEN_PORT = 9090;
   public static final int HREGION_VERSION = 1;
-  static final String THRIFT_SUPPORT_PROXYUSER = "hbase.thrift.support.proxyuser";
+
   private final int listenPort;
 
   private Configuration conf;
@@ -185,7 +193,8 @@ public class ThriftServerRunner implements Runnable {
   private final Hbase.Iface handler;
   private final ThriftMetrics metrics;
   private final HBaseHandler hbaseHandler;
-  private final UserGroupInformation realUser;
+  private final UserGroupInformation serviceUGI;
+  private final UserGroupInformation httpUGI;
 
   private final String qop;
   private String host;
@@ -288,7 +297,6 @@ public class ThriftServerRunner implements Runnable {
       }
       return l;
     }
-
   }
 
   public ThriftServerRunner(Configuration conf) throws IOException {
@@ -298,11 +306,24 @@ public class ThriftServerRunner implements Runnable {
       && userProvider.isHBaseSecurityEnabled();
     if (securityEnabled) {
       host = Strings.domainNamePointerToHostName(DNS.getDefaultHost(
-        conf.get("hbase.thrift.dns.interface", "default"),
-        conf.get("hbase.thrift.dns.nameserver", "default")));
-      userProvider.login("hbase.thrift.keytab.file",
-        "hbase.thrift.kerberos.principal", host);
+        conf.get(THRIFT_DNS_INTERFACE, "default"),
+        conf.get(THRIFT_DNS_NAMESERVER, "default")));
+      userProvider.login(THRIFT_KEYTAB_FILE, THRIFT_KERBEROS_PRINCIPAL, host);
     }
+    this.serviceUGI = userProvider.getCurrent().getUGI();
+
+    UserProvider httpUserProvider = UserProvider.instantiate(conf);
+    // login the server principal (if using secure Hadoop)
+    boolean httpEnabled = conf.getBoolean(USE_HTTP_CONF_KEY, false);
+    boolean httpSecurityEnabled = userProvider.isHadoopSecurityEnabled()
+        && userProvider.isHBaseSecurityEnabled();
+    if (httpEnabled && httpSecurityEnabled) {
+      httpUserProvider.login(THRIFT_SPNEGO_KEYTAB_FILE, THRIFT_SPNEGO_PRINCIPAL, host);
+      this.httpUGI = httpUserProvider.getCurrent().getUGI();
+    } else {
+      this.httpUGI = null;
+    }
+
     this.conf = HBaseConfiguration.create(conf);
     this.listenPort = conf.getInt(PORT_CONF_KEY, DEFAULT_LISTEN_PORT);
     this.metrics = new ThriftMetrics(conf, ThriftMetrics.ThriftServerType.ONE);
@@ -310,7 +331,7 @@ public class ThriftServerRunner implements Runnable {
     this.hbaseHandler.initMetrics(metrics);
     this.handler = HbaseHandlerMetricsProxy.newInstance(
       hbaseHandler, metrics, conf);
-    this.realUser = userProvider.getCurrent().getUGI();
+
     qop = conf.get(THRIFT_QOP_KEY);
     doAsEnabled = conf.getBoolean(THRIFT_SUPPORT_PROXYUSER, false);
     if (qop != null) {
@@ -331,7 +352,7 @@ public class ThriftServerRunner implements Runnable {
    */
   @Override
   public void run() {
-    realUser.doAs(new PrivilegedAction<Object>() {
+    serviceUGI.doAs(new PrivilegedAction<Object>() {
       @Override
       public Object run() {
         try {
@@ -373,8 +394,8 @@ public class ThriftServerRunner implements Runnable {
   private void setupHTTPServer() throws IOException {
     TProtocolFactory protocolFactory = new TBinaryProtocol.Factory();
     TProcessor processor = new Hbase.Processor<Hbase.Iface>(handler);
-    TServlet thriftHttpServlet = new ThriftHttpServlet(processor, protocolFactory, realUser,
-        conf, hbaseHandler, securityEnabled, doAsEnabled);
+    TServlet thriftHttpServlet = new ThriftHttpServlet(processor, protocolFactory, serviceUGI,
+        httpUGI, conf, hbaseHandler, securityEnabled, doAsEnabled);
 
     httpServer = new Server();
     // Context handler
@@ -459,7 +480,7 @@ public class ThriftServerRunner implements Runnable {
     } else {
       // Extract the name from the principal
       String name = SecurityUtil.getUserFromPrincipal(
-        conf.get("hbase.thrift.kerberos.principal"));
+        conf.get(THRIFT_KERBEROS_PRINCIPAL));
       Map<String, String> saslProperties = new HashMap<String, String>();
       saslProperties.put(Sasl.QOP, qop);
       TSaslServerTransport.Factory saslFactory = new TSaslServerTransport.Factory();
