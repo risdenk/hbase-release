@@ -43,6 +43,7 @@ import org.ietf.jgss.GSSException;
 import org.ietf.jgss.GSSManager;
 import org.ietf.jgss.GSSName;
 import org.ietf.jgss.Oid;
+import org.mortbay.jetty.HttpHeaders;
 
 /**
  * Thrift Http Servlet is used for performing Kerberos authentication if security is enabled and
@@ -61,8 +62,6 @@ public class ThriftHttpServlet extends TServlet {
   private String outToken;
 
   // HTTP Header related constants.
-  public static final String WWW_AUTHENTICATE = "WWW-Authenticate";
-  public static final String AUTHORIZATION = "Authorization";
   public static final String NEGOTIATE = "Negotiate";
 
   public ThriftHttpServlet(TProcessor processor, TProtocolFactory protocolFactory,
@@ -82,19 +81,32 @@ public class ThriftHttpServlet extends TServlet {
       throws ServletException, IOException {
     String effectiveUser = request.getRemoteUser();
     if (securityEnabled) {
+      /*
+      Check that the AUTHORIZATION header has any content. If it does not then return a 401
+      requesting AUTHORIZATION header to be sent. This is typical where the first request doesn't
+      send the AUTHORIZATION header initially.
+       */
+      String authHeader = request.getHeader(HttpHeaders.AUTHORIZATION);
+      if (authHeader == null || authHeader.isEmpty()) {
+        // Send a 401 to the client
+        response.addHeader(HttpHeaders.WWW_AUTHENTICATE, NEGOTIATE);
+        response.sendError(HttpServletResponse.SC_UNAUTHORIZED);
+        return;
+      }
+
       try {
         // As Thrift HTTP transport doesn't support SPNEGO yet (THRIFT-889),
         // Kerberos authentication is being done at servlet level.
         effectiveUser = doKerberosAuth(request);
         // It is standard for client applications expect this header.
         // Please see http://tools.ietf.org/html/rfc4559 for more details.
-        response.addHeader(WWW_AUTHENTICATE,  NEGOTIATE + " " + outToken);
+        response.addHeader(HttpHeaders.WWW_AUTHENTICATE,  NEGOTIATE + " " + outToken);
       } catch (HttpAuthenticationException e) {
         LOG.error("Kerberos Authentication failed", e);
         // Send a 401 to the client
-        response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-        response.addHeader(WWW_AUTHENTICATE, NEGOTIATE);
+        response.addHeader(HttpHeaders.WWW_AUTHENTICATE, NEGOTIATE);
         response.getWriter().println("Authentication Error: " + e.getMessage());
+        response.sendError(HttpServletResponse.SC_UNAUTHORIZED);
         return;
       }
     }
@@ -222,7 +234,7 @@ public class ThriftHttpServlet extends TServlet {
      */
     private String getAuthHeader(HttpServletRequest request)
         throws HttpAuthenticationException {
-      String authHeader = request.getHeader(AUTHORIZATION);
+      String authHeader = request.getHeader(HttpHeaders.AUTHORIZATION);
       // Each http request must have an Authorization header
       if (authHeader == null || authHeader.isEmpty()) {
         throw new HttpAuthenticationException("Authorization header received " +

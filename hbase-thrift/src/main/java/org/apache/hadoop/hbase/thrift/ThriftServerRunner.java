@@ -183,7 +183,6 @@ public class ThriftServerRunner implements Runnable {
 
   private static final String DEFAULT_BIND_ADDR = "0.0.0.0";
   public static final int DEFAULT_LISTEN_PORT = 9090;
-  public static final int HREGION_VERSION = 1;
 
   private final int listenPort;
 
@@ -207,8 +206,7 @@ public class ThriftServerRunner implements Runnable {
     HS_HA("hsha", true, THsHaServer.class, true),
     NONBLOCKING("nonblocking", true, TNonblockingServer.class, true),
     THREAD_POOL("threadpool", false, TBoundedThreadPoolServer.class, true),
-    THREADED_SELECTOR(
-        "threadedselector", true, TThreadedSelectorServer.class, true);
+    THREADED_SELECTOR("threadedselector", true, TThreadedSelectorServer.class, true);
 
     public static final ImplType DEFAULT = THREAD_POOL;
 
@@ -226,8 +224,7 @@ public class ThriftServerRunner implements Runnable {
     }
 
     /**
-     * @return <code>-option</code> so we can get the list of options from
-     *         {@link #values()}
+     * @return <code>-option</code>
      */
     @Override
     public String toString() {
